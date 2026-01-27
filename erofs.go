@@ -468,6 +468,11 @@ func (b *file) Read(p []byte) (int, error) {
 			return n, err
 		}
 		buf := blk.bytes()
+		// Limit copy to not exceed file size
+		remaining := fi.size - b.offset
+		if int64(len(buf)) > remaining {
+			buf = buf[:remaining]
+		}
 		copied := copy(p, buf)
 		n += copied
 		p = p[copied:]

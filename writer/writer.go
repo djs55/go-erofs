@@ -194,7 +194,12 @@ func needsExtendedInode(inode *builder.InodeData) bool {
 func (w *Writer) writeCompactInodeToBuffer(buf *bytes.Buffer, inode *builder.InodeData) error {
 	node := inode.Node
 
-	format := uint16(inode.Layout)
+	// Format field encoding:
+	// - Bit 0: inode version (0 = compact, 1 = extended)
+	// - Bits 1-3: layout (shifted left by 1)
+	// - Bit 7: xattr present flag
+	format := uint16(inode.Layout << 1) // Layout in bits 1-3
+	// Bit 0 is already 0 for compact inode
 	if len(inode.XattrData) > 0 {
 		format |= (1 << 7) // Set xattr bit
 	}
@@ -229,7 +234,11 @@ func (w *Writer) writeCompactInodeToBuffer(buf *bytes.Buffer, inode *builder.Ino
 func (w *Writer) writeExtendedInodeToBuffer(buf *bytes.Buffer, inode *builder.InodeData) error {
 	node := inode.Node
 
-	format := uint16(inode.Layout) | (1 << 8) // Extended format bit
+	// Format field encoding:
+	// - Bit 0: inode version (0 = compact, 1 = extended)
+	// - Bits 1-3: layout (shifted left by 1)
+	// - Bit 7: xattr present flag
+	format := uint16(inode.Layout<<1) | 1 // Layout in bits 1-3, bit 0 set for extended
 	if len(inode.XattrData) > 0 {
 		format |= (1 << 7) // Set xattr bit
 	}
