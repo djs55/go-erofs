@@ -16,6 +16,7 @@ type Config struct {
 	ForceUID  *uint32    // Override all UIDs
 	ForceGID  *uint32    // Override all GIDs
 	Timestamp *time.Time // Override build timestamp
+	UUID      *[16]byte  // Filesystem UUID
 }
 
 // Option is a functional option for Config
@@ -46,6 +47,13 @@ func WithForceGID(gid uint32) Option {
 func WithTimestamp(ts time.Time) Option {
 	return func(c *Config) {
 		c.Timestamp = &ts
+	}
+}
+
+// WithUUID sets the filesystem UUID
+func WithUUID(uuid [16]byte) Option {
+	return func(c *Config) {
+		c.UUID = &uuid
 	}
 }
 
@@ -84,7 +92,7 @@ func MakeFromTar(tarReader io.Reader, out io.Writer, opts ...Option) error {
 
 	// Write filesystem
 	w := writer.New(out, config.BlockSize)
-	if err := w.WriteFS(b, buildTime); err != nil {
+	if err := w.WriteFS(b, buildTime, config.UUID); err != nil {
 		return fmt.Errorf("writing filesystem: %w", err)
 	}
 

@@ -27,9 +27,14 @@ var (
 	verbosity     int
 	ignoreMtime   bool
 	preserveMtime bool
+	uuid          string
+	extendedOpts  string
 )
 
 func main() {
+	// Pre-process args to handle combined flags like -Enoinline_data
+	os.Args = preprocessArgs(os.Args)
+
 	// Define flags to match mkfs.erofs
 	flag.StringVar(&tarMode, "tar", "", "generate from tarball (f=full, i=index, headerball)")
 	flag.BoolVar(&aufs, "aufs", false, "replace aufs special files with overlayfs metadata")
@@ -46,6 +51,8 @@ func main() {
 	flag.IntVar(&verbosity, "d", 2, "set output verbosity (0=quiet, 9=verbose)")
 	flag.BoolVar(&ignoreMtime, "ignore-mtime", false, "use build time instead of per-file mtime")
 	flag.BoolVar(&preserveMtime, "preserve-mtime", false, "keep per-file mtime")
+	flag.StringVar(&uuid, "U", "", "filesystem UUID")
+	flag.StringVar(&extendedOpts, "E", "", "extended options")
 
 	flag.Usage = printUsage
 	flag.Parse()
@@ -84,6 +91,21 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Validate extended options
+	if extendedOpts != "" {
+		if err := validateExtendedOpts(extendedOpts); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+	}
+
+	// Check for tar index mode
+	if tarMode == "i" || tarMode == "headerball" {
+		fmt.Fprintf(os.Stderr, "Error: --tar=%s (index mode) not yet implemented\n", tarMode)
+		fmt.Fprintf(os.Stderr, "Please use --tar=f for full conversion mode\n")
+		os.Exit(1)
+	}
+
 	// For tar mode or aufs mode, merge tar files
 	if tarMode != "" || aufs || len(inputFiles) > 0 {
 		if err := createFromTars(outputFile, inputFiles); err != nil {
@@ -111,7 +133,9 @@ func printUsage() {
 	fmt.Fprintf(os.Stderr, "  -b#                   set block size to # bytes (default: 4096)\n")
 	fmt.Fprintf(os.Stderr, "  -d<0-9>               set output verbosity (default: 2)\n")
 	fmt.Fprintf(os.Stderr, "  -T#                   specify fixed UNIX timestamp\n")
-	fmt.Fprintf(os.Stderr, "  --tar=X               generate from tarball (X=f|i|headerball)\n")
+	fmt.Fprintf(os.Stderr, "  -U<uuid>              filesystem UUID\n")
+	fmt.Fprintf(os.Stderr, "  -E<options>           extended options (noinline_data supported)\n")
+	fmt.Fprintf(os.Stderr, "  --tar=X               generate from tarball (X=f for full mode)\n")
 	fmt.Fprintf(os.Stderr, "  --aufs                replace aufs special files (implies tar mode)\n")
 	fmt.Fprintf(os.Stderr, "  --ovlfs-strip=<0,1>   strip overlayfs metadata\n")
 	fmt.Fprintf(os.Stderr, "  --force-uid=#         set all file uids to #\n")
@@ -120,6 +144,87 @@ func printUsage() {
 	fmt.Fprintf(os.Stderr, "  --ignore-mtime        use build time for all files\n")
 	fmt.Fprintf(os.Stderr, "  --preserve-mtime      keep per-file modification time\n")
 	fmt.Fprintf(os.Stderr, "\nNOTE: This is a minimal Go implementation supporting tar input only.\n")
+	fmt.Fprintf(os.Stderr, "      --tar=i (index mode) is not yet implemented.\n")
+}
+
+func validateExtendedOpts(opts string) error {
+	for _, opt := range strings.Split(opts, ",") {
+		switch opt {
+		case "noinline_data":
+			// This is already our default behavior - FLAT_PLAIN layout never inlines data.
+			// Accept silently as it matches our implementation.
+		default:
+			return fmt.Errorf("unsupported extended option: %s", opt)
+		}
+	}
+	return nil
+}
+
+func parseUUID(s string) ([16]byte, error) {
+	var uuid [16]byte
+
+	// Remove dashes from UUID string (e.g., "550e8400-e29b-41d4-a716-446655440000")
+	s = strings.ReplaceAll(s, "-", "")
+
+	if len(s) != 32 {
+		return uuid, fmt.Errorf("invalid UUID length: expected 32 hex digits, got %d", len(s))
+	}
+
+	// Parse hex string into bytes
+	for i := 0; i < 16; i++ {
+		b, err := fmt.Sscanf(s[i*2:i*2+2], "%02x", &uuid[i])
+		if err != nil || b != 1 {
+			return uuid, fmt.Errorf("invalid UUID format at position %d", i)
+		}
+	}
+
+	return uuid, nil
+}
+
+// preprocessArgs splits combined flags like -Enoinline_data into -E noinline_data
+// and -U<uuid> into -U <uuid> for compatibility with original mkfs.erofs syntax
+func preprocessArgs(args []string) []string {
+	var result []string
+	result = append(result, args[0]) // Keep program name
+
+	for i := 1; i < len(args); i++ {
+		arg := args[i]
+
+		// Handle -E<option> -> -E <option>
+		if strings.HasPrefix(arg, "-E") && len(arg) > 2 {
+			result = append(result, "-E", arg[2:])
+			continue
+		}
+
+		// Handle -U<uuid> -> -U <uuid>
+		if strings.HasPrefix(arg, "-U") && len(arg) > 2 {
+			result = append(result, "-U", arg[2:])
+			continue
+		}
+
+		// Handle -T<timestamp> -> -T <timestamp>
+		if strings.HasPrefix(arg, "-T") && len(arg) > 2 {
+			result = append(result, "-T", arg[2:])
+			continue
+		}
+
+		// Handle -b<size> -> -b <size>
+		if strings.HasPrefix(arg, "-b") && len(arg) > 2 {
+			result = append(result, "-b", arg[2:])
+			continue
+		}
+
+		// Handle -d<level> -> -d <level>
+		if strings.HasPrefix(arg, "-d") && len(arg) > 2 {
+			result = append(result, "-d", arg[2:])
+			continue
+		}
+
+		// Keep everything else as-is
+		result = append(result, arg)
+	}
+
+	return result
 }
 
 func createFromTars(outputFile string, inputFiles []string) error {
@@ -166,6 +271,15 @@ func createFromTars(outputFile string, inputFiles []string) error {
 	} else if ignoreMtime {
 		ts := time.Now()
 		opts = append(opts, erofs.WithTimestamp(ts))
+	}
+
+	// UUID
+	if uuid != "" {
+		parsedUUID, err := parseUUID(uuid)
+		if err != nil {
+			return fmt.Errorf("invalid UUID: %w", err)
+		}
+		opts = append(opts, erofs.WithUUID(parsedUUID))
 	}
 
 	// Create EROFS image

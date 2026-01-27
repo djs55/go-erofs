@@ -34,7 +34,7 @@ func New(w io.Writer, blockBits uint8) *Writer {
 }
 
 // WriteFS writes a complete EROFS filesystem
-func (w *Writer) WriteFS(b *builder.Builder, buildTime time.Time) error {
+func (w *Writer) WriteFS(b *builder.Builder, buildTime time.Time, uuid *[16]byte) error {
 	// Write to buffer first so we can calculate checksum
 	w.buffer.Reset()
 
@@ -75,6 +75,11 @@ func (w *Writer) WriteFS(b *builder.Builder, buildTime time.Time) error {
 		Blocks:       totalBlocks,
 		MetaBlkAddr:  uint32(metaStart) / w.blockSize,
 		XattrBlkAddr: 0, // No shared xattrs for MVP
+	}
+
+	// Set UUID if provided
+	if uuid != nil {
+		sb.UUID = *uuid
 	}
 
 	// Calculate checksum over entire image
