@@ -211,6 +211,10 @@ func (b *Builder) processInode(inode *InodeData) error {
 		inode.Layout = disk.LayoutFlatPlain
 
 		linkData := []byte(node.Linkname)
+		// CRITICAL: Set node size to length of symlink target
+		// The kernel uses this to know how many bytes to read
+		node.Size = int64(len(linkData))
+
 		inode.BlockAddr = b.nextDataBlock
 		b.dataBlocks = append(b.dataBlocks, DataBlock{
 			Addr: b.nextDataBlock,
