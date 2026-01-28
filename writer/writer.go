@@ -208,11 +208,17 @@ func (w *Writer) writeCompactInodeToBuffer(buf *bytes.Buffer, inode *builder.Ino
 
 	inodeData := calculateInodeData(inode, inode.Layout, inode.BlockAddr)
 
+	// Use nlink count from builder
+	nlink := uint16(inode.Nlink)
+	if nlink == 0 {
+		nlink = 1 // default to 1
+	}
+
 	ic := disk.InodeCompact{
 		Format:     format,
 		XattrCount: uint16(len(node.Xattrs)),
 		Mode:       mode,
-		Nlink:      1,
+		Nlink:      nlink,
 		Size:       uint32(node.Size),
 		Reserved:   0,
 		InodeData:  inodeData,
@@ -220,11 +226,6 @@ func (w *Writer) writeCompactInodeToBuffer(buf *bytes.Buffer, inode *builder.Ino
 		UID:        uint16(node.UID),
 		GID:        uint16(node.GID),
 		Reserved2:  0,
-	}
-
-	// Handle hardlinks
-	if node.Hardlink != nil {
-		ic.Nlink = 2 // Simplified - would need proper link counting
 	}
 
 	return binary.Write(buf, binary.LittleEndian, &ic)
@@ -247,6 +248,12 @@ func (w *Writer) writeExtendedInodeToBuffer(buf *bytes.Buffer, inode *builder.In
 
 	inodeData := calculateInodeData(inode, inode.Layout, inode.BlockAddr)
 
+	// Use nlink count from builder
+	nlink := inode.Nlink
+	if nlink == 0 {
+		nlink = 1 // default to 1
+	}
+
 	ie := disk.InodeExtended{
 		Format:     format,
 		XattrCount: uint16(len(node.Xattrs)),
@@ -259,12 +266,7 @@ func (w *Writer) writeExtendedInodeToBuffer(buf *bytes.Buffer, inode *builder.In
 		GID:        node.GID,
 		Mtime:      uint64(node.Mtime.Unix()),
 		MtimeNs:    node.MtimeNs,
-		Nlink:      1,
-	}
-
-	// Handle hardlinks
-	if node.Hardlink != nil {
-		ie.Nlink = 2 // Simplified
+		Nlink:      nlink,
 	}
 
 	return binary.Write(buf, binary.LittleEndian, &ie)

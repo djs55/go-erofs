@@ -516,6 +516,9 @@ type dir struct {
 
 	//consumed is how many have been returned in the current block
 	consumed uint16
+
+	// dirData caches the entire directory data for multi-block directories
+	dirData []byte
 }
 
 func (d *dir) ReadDir(n int) ([]fs.DirEntry, error) {
@@ -524,50 +527,91 @@ func (d *dir) ReadDir(n int) ([]fs.DirEntry, error) {
 		return nil, fmt.Errorf("readInfo failed: %w", err)
 	}
 
+	// Load all directory data into memory if not already loaded
+	// Directory data can span multiple blocks, and NameOff is relative to the start
+	if d.dirData == nil {
+		d.dirData = make([]byte, fi.size)
+		pos := int64(0)
+		offset := 0
+
+		for pos < fi.size {
+			b, err := d.img.loadBlock(fi, pos)
+			if err != nil {
+				if errors.Is(err, io.EOF) {
+					break
+				}
+				return nil, err
+			}
+			buf := b.bytes()
+			copied := copy(d.dirData[offset:], buf)
+			offset += copied
+			pos += int64(copied)
+			d.img.putBlock(b)
+		}
+	}
+
+	buf := d.dirData
+	if len(buf) < 12 {
+		return nil, nil
+	}
+
 	var ents []fs.DirEntry
-	pos := int64(d.bn << d.img.sb.BlkSizeBits)
-	for pos < fi.size {
-		b, err := d.img.loadBlock(fi, pos)
-		if err != nil {
-			if errors.Is(err, io.EOF) {
-				return ents, nil
-			}
-			return nil, err
+	blockSize := uint32(4096) // EROFS block size
+	entryIdx := uint16(0)
+
+	// For multi-block directories, we need to process each block separately
+	// Each block has its own set of dirents with NameOff relative to that block
+	for blockStart := uint32(0); blockStart < uint32(len(buf)); blockStart += blockSize {
+		blockEnd := blockStart + blockSize
+		if blockEnd > uint32(len(buf)) {
+			blockEnd = uint32(len(buf))
 		}
-		buf := b.bytes()
-		if len(buf) < 12 {
-			return ents, nil
+		blockData := buf[blockStart:blockEnd]
+
+		if len(blockData) < 12 {
+			break
 		}
 
+		// Read first dirent of this block
+		var firstDirent disk.Dirent
+		readN, err := binary.Decode(blockData[:12], binary.LittleEndian, &firstDirent)
+		if err != nil || readN != 12 {
+			break
+		}
+
+		// Calculate number of entries in this block
+		blockEntryN := firstDirent.NameOff / disk.SizeDirent
+		if blockEntryN == 0 {
+			break
+		}
+
+		// Process entries in this block
 		var dirents [2]disk.Dirent
+		dirents[0] = firstDirent
 
-		readN, err := binary.Decode(buf[:12], binary.LittleEndian, &dirents[0])
-		if err != nil {
-			return nil, fmt.Errorf("decode failed: %w", err)
-		}
-		if readN != 12 {
-			return nil, errors.New("invalid dirent: not fully decoded")
-		}
-
-		entryN := dirents[0].NameOff / disk.SizeDirent
-
-		for i := uint16(0); i < entryN; i++ {
+		for i := uint16(0); i < blockEntryN; i++ {
 			var name string
-			if i < entryN-1 {
-				start := 12 * (i + 1)
-				readN, err := binary.Decode(buf[start:start+12], binary.LittleEndian, &dirents[1])
-				if err != nil {
-					return nil, fmt.Errorf("decode failed: %w", err)
+			if i < blockEntryN-1 {
+				start := int(12 * (i + 1))
+				if start+12 > len(blockData) {
+					break
 				}
-				if readN != 12 {
-					return nil, errors.New("invalid dirent: not fully decoded")
+				readN, err := binary.Decode(blockData[start:start+12], binary.LittleEndian, &dirents[1])
+				if err != nil || readN != 12 {
+					break
 				}
-				name = string(buf[dirents[0].NameOff:dirents[1].NameOff])
+				if int(dirents[1].NameOff) > len(blockData) {
+					break
+				}
+				name = string(blockData[dirents[0].NameOff:dirents[1].NameOff])
 			} else {
-				name = string(buf[dirents[0].NameOff:])
+				if int(dirents[0].NameOff) > len(blockData) {
+					break
+				}
+				name = string(blockData[dirents[0].NameOff:])
 			}
 
-			if i >= d.consumed && name != "." && name != ".." {
+			if entryIdx >= d.consumed && name != "." && name != ".." {
 				b := file{
 					img:   d.file.img,
 					name:  name,
@@ -575,26 +619,27 @@ func (d *dir) ReadDir(n int) ([]fs.DirEntry, error) {
 					ftype: disk.EroFSFtypeToFileMode(dirents[0].FileType),
 				}
 				ents = append(ents, &direntry{b})
-				d.consumed = i + 1
+				d.consumed = entryIdx + 1
 
 				if n > 0 && len(ents) == n {
-					if i == entryN-1 {
-						d.consumed = 0
-						d.bn++
-					}
 					return ents, nil
 				}
 			}
 
-			// Rotate next to current
+			entryIdx++
 			dirents[0] = dirents[1]
 		}
-
-		d.consumed = 0
-		d.bn++
-		pos = int64(d.bn << d.img.sb.BlkSizeBits)
 	}
 
+	// We've reached the end of the directory
+	// Return io.EOF if n > 0 and we got no entries (standard behavior)
+	if n > 0 && len(ents) == 0 {
+		d.consumed = 0 // Reset for next full iteration
+		return nil, io.EOF
+	}
+
+	// For n <= 0 or when we have entries, return what we got
+	// Don't reset d.consumed - let it track our position
 	return ents, nil
 }
 

@@ -19,6 +19,7 @@ type Builder struct {
 	blockSize uint32
 
 	inodeMap      map[string]uint64
+	nlinkCount    map[uint64]uint32 // counts links per NID
 	inodeList     []InodeData
 	dataBlocks    []DataBlock
 	nextNid       uint64
@@ -32,6 +33,7 @@ type InodeData struct {
 	Node      *tarfs.Node
 	Layout    uint8
 	BlockAddr uint32 // data location in blocks
+	Nlink     uint32 // number of hardlinks to this inode
 	Children  []DirEntry
 	XattrData []byte
 }
@@ -59,6 +61,7 @@ func New(tree *tarfs.Tree, blockBits uint8) *Builder {
 		blockBits:     blockBits,
 		blockSize:     1 << blockBits,
 		inodeMap:      make(map[string]uint64),
+		nlinkCount:    make(map[uint64]uint32),
 		nextNid:       16, // root NID is 16
 		nextDataBlock: 8,  // first 8 blocks reserved
 	}
@@ -90,6 +93,11 @@ func (b *Builder) Build() error {
 	// Data blocks start after reserved area (8 blocks) + metadata
 	b.nextDataBlock = uint32(8 + metadataBlocks)
 
+	// Set nlink counts for each inode
+	for i := range b.inodeList {
+		b.inodeList[i].Nlink = b.nlinkCount[b.inodeList[i].Nid]
+	}
+
 	// Process each inode
 	for i := range b.inodeList {
 		if err := b.processInode(&b.inodeList[i]); err != nil {
@@ -102,11 +110,34 @@ func (b *Builder) Build() error {
 
 // assignNids performs depth-first traversal to assign NIDs
 func (b *Builder) assignNids(node *tarfs.Node) error {
+	// If this is a hardlink, it should use its target's NID
+	// Don't assign a new NID or create a new inode
+	if node.Hardlink != nil {
+		// Store mapping from this path to the target's NID
+		// The target should already have a NID assigned
+		targetNid, exists := b.inodeMap[node.Hardlink.Path]
+		if !exists {
+			// Target not yet processed - this shouldn't happen if we process in the right order
+			// but handle it gracefully by assigning the target's NID first
+			if err := b.assignNids(node.Hardlink); err != nil {
+				return err
+			}
+			targetNid = b.inodeMap[node.Hardlink.Path]
+		}
+		b.inodeMap[node.Path] = targetNid
+		// Increment link count for the target NID
+		b.nlinkCount[targetNid]++
+		// Don't create a new inode or add to inodeList
+		return nil
+	}
+
 	// Assign NID to this node
 	nid := b.nextNid
 	b.nextNid++
 
 	b.inodeMap[node.Path] = nid
+	// Initialize link count to 1 (the node itself)
+	b.nlinkCount[nid] = 1
 
 	inodeData := InodeData{
 		Nid:  nid,
