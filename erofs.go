@@ -1,6 +1,7 @@
 package erofs
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -608,7 +609,13 @@ func (d *dir) ReadDir(n int) ([]fs.DirEntry, error) {
 				if int(dirents[0].NameOff) > len(blockData) {
 					break
 				}
-				name = string(blockData[dirents[0].NameOff:])
+				nameBytes := blockData[dirents[0].NameOff:]
+				// Find first null byte (padding starts after names)
+				nullIdx := bytes.IndexByte(nameBytes, 0)
+				if nullIdx >= 0 {
+					nameBytes = nameBytes[:nullIdx]
+				}
+				name = string(nameBytes)
 			}
 
 			if entryIdx >= d.consumed && name != "." && name != ".." {

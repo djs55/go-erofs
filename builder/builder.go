@@ -260,38 +260,89 @@ func (b *Builder) processInode(inode *InodeData) error {
 }
 
 // packDirEntries serializes directory entries
+// Large directories must be split across multiple 4KB blocks,
+// with each block containing its own dirents followed by names
 func (b *Builder) packDirEntries(entries []DirEntry) ([]byte, error) {
 	if len(entries) == 0 {
 		return nil, nil
 	}
 
-	buf := new(bytes.Buffer)
+	const blockSize = 4096
+	result := new(bytes.Buffer)
 
-	// Calculate name offset for each entry
-	// Each dirent is 12 bytes, followed by all names
-	nameOff := uint16(len(entries) * disk.SizeDirent)
-	nameData := new(bytes.Buffer)
+	entryIdx := 0
+	for entryIdx < len(entries) {
+		// Pack entries into this block
+		blockBuf := new(bytes.Buffer)
+		namesBuf := new(bytes.Buffer)
 
-	for _, entry := range entries {
-		dirent := disk.Dirent{
-			Nid:      entry.Nid,
-			NameOff:  nameOff,
-			FileType: entry.FileType,
-			Reserved: 0,
+		// Calculate how many entries fit in this block
+		blockStart := entryIdx
+		namesStart := uint16(0) // Will be set after we know entry count
+
+		for entryIdx < len(entries) {
+			entry := entries[entryIdx]
+
+			// Check if this entry fits in the current block
+			// Space needed: (entries_so_far + 1) * 12 bytes for dirents + total name bytes
+			entriesInBlock := entryIdx - blockStart + 1
+			direntsSize := entriesInBlock * disk.SizeDirent
+			namesSize := namesBuf.Len() + len(entry.Name)
+			totalSize := direntsSize + namesSize
+
+			if totalSize > blockSize {
+				// This entry doesn't fit, start a new block
+				break
+			}
+
+			namesBuf.WriteString(entry.Name)
+			entryIdx++
 		}
 
-		if err := binary.Write(buf, binary.LittleEndian, &dirent); err != nil {
-			return nil, err
+		// Now write dirents for entries in this block
+		entriesInBlock := entryIdx - blockStart
+		if entriesInBlock == 0 {
+			// Single entry name is too long to fit in a block
+			// This shouldn't happen with reasonable filenames
+			return nil, fmt.Errorf("directory entry name too long to fit in block")
 		}
 
-		nameData.WriteString(entry.Name)
-		nameOff += uint16(len(entry.Name))
+		namesStart = uint16(entriesInBlock * disk.SizeDirent)
+		nameOff := namesStart
+		namesData := namesBuf.Bytes()
+		namePos := 0
+
+		for i := blockStart; i < entryIdx; i++ {
+			entry := entries[i]
+
+			dirent := disk.Dirent{
+				Nid:      entry.Nid,
+				NameOff:  nameOff,
+				FileType: entry.FileType,
+				Reserved: 0,
+			}
+
+			if err := binary.Write(blockBuf, binary.LittleEndian, &dirent); err != nil {
+				return nil, err
+			}
+
+			nameOff += uint16(len(entry.Name))
+			namePos += len(entry.Name)
+		}
+
+		// Append names after dirents
+		blockBuf.Write(namesData)
+
+		// Pad block to 4096 bytes
+		padding := blockSize - blockBuf.Len()
+		if padding > 0 {
+			blockBuf.Write(make([]byte, padding))
+		}
+
+		result.Write(blockBuf.Bytes())
 	}
 
-	// Append all names after dirents
-	buf.Write(nameData.Bytes())
-
-	return buf.Bytes(), nil
+	return result.Bytes(), nil
 }
 
 // serializeXattrs converts xattr map to EROFS xattr format
